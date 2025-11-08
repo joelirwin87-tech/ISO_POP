@@ -35,5 +35,4 @@ def load_config(path: Path) -> Dict[str, Any]:
         raise ConfigError("refresh_interval must be a positive number of seconds.")
 
     data.setdefault("keywords", [])
-    data.setdefault("proxies", [])
     return data

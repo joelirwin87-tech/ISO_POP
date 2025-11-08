@@ -1,68 +1,50 @@
-"""Supreme monitor implementation using the public mobile_stock endpoint."""
+"""HTML scraper for Supreme product listings."""
 from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List
+from urllib.parse import urljoin
 
-from .base import SiteMonitor
+from bs4 import BeautifulSoup
+
+from utils.request import fetch_text
 
 LOGGER = logging.getLogger(__name__)
 
+SITE_NAME = "Supreme"
 
-class SupremeMonitor(SiteMonitor):
-    async def fetch_products(self) -> List[Dict[str, Any]]:
-        endpoint = self.config.get("endpoint", "https://www.supremenewyork.com/mobile_stock.json")
-        data = await self.request_client.get_json(endpoint)
+
+def create_scraper(config: Dict[str, Any]):
+    base_url = config.get("base_url", "https://www.supremenewyork.com")
+    catalog_path = config.get("catalog_path", "/shop/all")
+
+    async def scrape(session, keyword):
+        html = await fetch_text(session, f"{base_url.rstrip('/')}{catalog_path}")
+        soup = BeautifulSoup(html, "html.parser")
         products: List[Dict[str, Any]] = []
-        for category_items in data.get("products_and_categories", {}).values():
-            for item in category_items:
-                product_id = str(item.get("id"))
-                name = item.get("name", "Supreme Product")
-                url = f"https://www.supremenewyork.com/shop/{product_id}"
-                # Supreme requires a second call for style-specific stock.
-                try:
-                    detail_endpoint = f"https://www.supremenewyork.com/shop/{product_id}.json"
-                    detail = await self.request_client.get_json(detail_endpoint)
-                except Exception as exc:  # noqa: BLE001 - Supreme often rate limits.
-                    LOGGER.debug("Failed to load detail for %s: %s", product_id, exc)
-                    continue
-                styles = detail.get("styles", [])
-                for style in styles:
-                    style_id = style.get("id")
-                    image_url = style.get("image_url", "")
-                    sizes = {}
-                    for size in style.get("sizes", []):
-                        sizes[size.get("name", "OS")] = 1 if size.get("stock_level", 0) > 0 else 0
-                    products.append(
-                        {
-                            "id": f"{product_id}-{style_id}",
-                            "name": f"{name} - {style.get('name', 'Default')}",
-                            "price": f"{detail.get('price', 0) / 100:,.2f}",
-                            "image": f"https:{image_url}",
-                            "url": url,
-                            "direct_to_cart": url,
-                            "sizes": sizes,
-                        }
-                    )
+
+        for product in soup.select("ul#shop-scroller li a"):
+            title = " ".join(product.stripped_strings)
+            if keyword and keyword.lower() not in title.lower():
+                continue
+            url = urljoin(base_url, product.get("href", ""))
+            image_tag = product.find("img")
+            image = urljoin(base_url, image_tag["src"]) if image_tag and image_tag.get("src") else ""
+            price_tag = product.find("span", class_="price")
+            price = price_tag.text.strip() if price_tag else "Unknown"
+            products.append(
+                {
+                    "title": title,
+                    "url": url,
+                    "image": image,
+                    "price": price,
+                    "sizes": {},
+                    "site": config.get("name", SITE_NAME),
+                }
+            )
+
+        if not products:
+            LOGGER.debug("Supreme scraper found no matches for keyword '%s'", keyword)
         return products
 
-    def build_embed(self, product: Dict[str, Any], diff: Dict[str, List[str]]) -> Dict[str, Any]:
-        description = "\n".join(
-            part
-            for part in [
-                f"New: {', '.join(diff['new_sizes'])}" if diff["new_sizes"] else "",
-                f"Restocked: {', '.join(diff['restocks'])}" if diff["restocks"] else "",
-                f"Sold out: {', '.join(diff['oos'])}" if diff["oos"] else "",
-            ]
-            if part
-        ) or "Supreme stock change"
-        return {
-            "title": product["name"],
-            "url": product["url"],
-            "description": description,
-            "thumbnail": {"url": product.get("image", "")},
-            "fields": [
-                {"name": "Price", "value": f"${product.get('price', '0')}", "inline": True},
-                {"name": "Sizes", "value": ", ".join(product.get("sizes", {}).keys()) or "N/A", "inline": False},
-            ],
-        }
+    return scrape

@@ -1,71 +1,73 @@
-"""Nike SNKRS monitor implementation."""
+"""HTML scraper for Nike retail listings."""
 from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List
+from urllib.parse import quote_plus
 
-from .base import SiteMonitor
+from bs4 import BeautifulSoup
+
+from utils.request import fetch_text
+
+from .parsers import iter_json_scripts
 
 LOGGER = logging.getLogger(__name__)
 
+SITE_NAME = "Nike"
 
-class NikeMonitor(SiteMonitor):
-    async def fetch_products(self) -> List[Dict[str, Any]]:
-        endpoint = self.config.get(
-            "endpoint",
-            "https://api.nike.com/product_feed/threads/v2/?filter=marketplace(US)&filter=language(en-US)&filter=channelId(snkrs_web_app)&count=20",
-        )
-        data = await self.request_client.get_json(endpoint)
+
+def create_scraper(config: Dict[str, Any]):
+    base_url = config.get("base_url", "https://www.nike.com")
+    search_path = config.get("search_path", "/w?q={query}")
+
+    async def scrape(session, keyword):
+        query = keyword or config.get("fallback_query", "")
+        if not query:
+            return []
+        search_url = f"{base_url.rstrip('/')}{search_path.format(query=quote_plus(query))}"
+        html = await fetch_text(session, search_url)
+        soup = BeautifulSoup(html, "html.parser")
         products: List[Dict[str, Any]] = []
-        for thread in data.get("objects", []):
-            product = thread.get("productInfo", [{}])[0]
-            merch_product = product.get("merchProduct", {})
-            sku_data = product.get("skus", [])
-            sizes = {}
-            for sku in sku_data:
-                sizes[sku.get("countrySpecifications", [{}])[0].get("localizedSize", sku.get("nikeSize", "Unknown"))] = (
-                    1 if sku.get("available", False) else 0
+
+        for payload in iter_json_scripts(soup, script_id="__NEXT_DATA__"):
+            data = payload
+            try:
+                items = (
+                    data["props"]["pageProps"]["initialState"]["Wall"]["products"]["products"]
                 )
-            image_url = ""
-            images = product.get("imageUrls", {})
-            if images.get("productImageUrl"):
-                image_url = images["productImageUrl"]
-            url = product.get("launchView", {}).get("productUrl") or thread.get("publishedContent", {}).get("nodes", [{}])[0].get("url")
-            if url and url.startswith("/"):
-                url = f"https://www.nike.com{url}"
-            price_obj = merch_product.get("price", {})
-            price = price_obj.get("currentRetailPrice") or price_obj.get("msrp", 0)
-            products.append(
-                {
-                    "id": merch_product.get("styleColor", thread.get("id")),
-                    "name": merch_product.get("label", thread.get("title")),
-                    "price": f"{price:,.2f}",
-                    "image": image_url,
-                    "url": url or "https://www.nike.com/launch",
-                    "direct_to_cart": url or "https://www.nike.com/cart",
-                    "sizes": sizes,
-                }
-            )
+            except KeyError:
+                continue
+            for item in items:
+                title = item.get("title") or item.get("fullTitle") or ""
+                if keyword and keyword.lower() not in title.lower():
+                    continue
+                url = item.get("pdpUrl") or ""
+                if url.startswith("/"):
+                    url = f"{base_url.rstrip('/')}{url}"
+                price_raw = item.get("price", {}).get("currentRetailPrice") or item.get("price", {}).get("msrp")
+                if isinstance(price_raw, (int, float)):
+                    price = f"${price_raw:,.2f}"
+                else:
+                    price = str(price_raw) if price_raw else "Unknown"
+                image = item.get("imageUrl") or ""
+                sizes = {}
+                for sku in item.get("skus", []):
+                    size = sku.get("nikeSize") or sku.get("sizeDescription")
+                    if size:
+                        sizes[str(size)] = sku.get("available", False)
+                products.append(
+                    {
+                        "title": title,
+                        "url": url,
+                        "image": image,
+                        "price": price,
+                        "sizes": sizes,
+                        "site": config.get("name", SITE_NAME),
+                    }
+                )
+
+        if not products:
+            LOGGER.debug("Nike scraper found no JSON payloads for %s", search_url)
         return products
 
-    def build_embed(self, product: Dict[str, Any], diff: Dict[str, List[str]]) -> Dict[str, Any]:
-        description = " | ".join(
-            part
-            for part in [
-                f"New sizes: {', '.join(diff['new_sizes'])}" if diff["new_sizes"] else "",
-                f"Restocks: {', '.join(diff['restocks'])}" if diff["restocks"] else "",
-                f"OOS: {', '.join(diff['oos'])}" if diff["oos"] else "",
-            ]
-            if part
-        ) or "Nike stock change detected"
-        return {
-            "title": f"{product['name']} (Nike)",
-            "url": product["url"],
-            "description": description,
-            "thumbnail": {"url": product.get("image", "")},
-            "fields": [
-                {"name": "Price", "value": f"${product.get('price', '0')}", "inline": True},
-                {"name": "Sizes", "value": ", ".join(product.get("sizes", {}).keys()) or "N/A", "inline": False},
-                {"name": "Direct", "value": product.get("direct_to_cart", "https://www.nike.com/cart"), "inline": False},
-            ],
-        }
+    return scrape

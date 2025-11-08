@@ -1,65 +1,76 @@
-"""Adidas monitor implementation."""
+"""HTML scraper for Adidas store listings."""
 from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List
+from urllib.parse import quote_plus
 
-from .base import SiteMonitor
+from bs4 import BeautifulSoup
+
+from utils.request import fetch_text
+
+from .parsers import iter_json_scripts
 
 LOGGER = logging.getLogger(__name__)
 
+SITE_NAME = "Adidas"
 
-class AdidasMonitor(SiteMonitor):
-    async def fetch_products(self) -> List[Dict[str, Any]]:
-        keyword_query = "+".join(self.keywords) if self.keywords else self.config.get("fallback_query", "yeezy")
-        endpoint = self.config.get(
-            "endpoint",
-            f"https://www.adidas.com/api/plp/content-engine?sitePath=us&query={keyword_query}&start=0&count=48",
-        )
-        data = await self.request_client.get_json(endpoint)
-        grid = data.get("grid", {})
+
+def create_scraper(config: Dict[str, Any]):
+    base_url = config.get("base_url", "https://www.adidas.com")
+    market = config.get("market", "us").lower()
+    search_path = config.get("search_path", "/{market}/search?q={query}")
+
+    async def scrape(session, keyword):
+        query = keyword or config.get("fallback_query", "")
+        if not query:
+            return []
+        path = search_path.format(market=market, query=quote_plus(query))
+        search_url = f"{base_url.rstrip('/')}{path}"
+        html = await fetch_text(session, search_url)
+        soup = BeautifulSoup(html, "html.parser")
         products: List[Dict[str, Any]] = []
-        for item in grid.get("items", []):
-            availability = item.get("availability", {})
-            variation_list = availability.get("variation_list", [])
-            sizes = {}
-            for variant in variation_list:
-                size_label = variant.get("size") or variant.get("sku") or "OS"
-                sizes[size_label] = 1 if variant.get("availability") == "IN_STOCK" else 0
-            product_id = item.get("id") or item.get("model_number")
-            url = "https://www.adidas.com" + item.get("link", "")
-            image = item.get("image", {}).get("src")
-            price = item.get("price", {}).get("current_price", 0)
-            products.append(
-                {
-                    "id": product_id,
-                    "name": item.get("name", "Adidas Product"),
-                    "price": f"{price:,.2f}",
-                    "image": image,
-                    "url": url,
-                    "direct_to_cart": url,
-                    "sizes": sizes,
-                }
-            )
+
+        for payload in iter_json_scripts(soup, script_id="__NEXT_DATA__"):
+            try:
+                items = (
+                    payload["props"]["pageProps"]["pageData"]["gridWall"]["products"]
+                )
+            except KeyError:
+                continue
+            for item in items:
+                title = item.get("name") or ""
+                if keyword and keyword.lower() not in title.lower():
+                    continue
+                url = item.get("pdpLink") or ""
+                if url.startswith("/"):
+                    url = f"{base_url.rstrip('/')}{url}"
+                price_raw = item.get("price") or item.get("salePrice")
+                if isinstance(price_raw, (int, float)):
+                    price = f"${price_raw:,.2f}"
+                else:
+                    price = str(price_raw) if price_raw else "Unknown"
+                image = item.get("image") or item.get("imageLarge") or ""
+                sizes = {}
+                for size in item.get("availability", {}).get("sizes", []):
+                    if isinstance(size, dict):
+                        label = size.get("size") or size.get("displaySize")
+                        available = size.get("available", False)
+                        if label:
+                            sizes[str(label)] = available
+                products.append(
+                    {
+                        "title": title,
+                        "url": url,
+                        "image": image,
+                        "price": price,
+                        "sizes": sizes,
+                        "site": config.get("name", SITE_NAME),
+                    }
+                )
+
+        if not products:
+            LOGGER.debug("Adidas scraper found no structured data for %s", search_url)
         return products
 
-    def build_embed(self, product: Dict[str, Any], diff: Dict[str, List[str]]) -> Dict[str, Any]:
-        description = "\n".join(
-            part
-            for part in [
-                f"New: {', '.join(diff['new_sizes'])}" if diff["new_sizes"] else "",
-                f"Restocked: {', '.join(diff['restocks'])}" if diff["restocks"] else "",
-                f"Sold out: {', '.join(diff['oos'])}" if diff["oos"] else "",
-            ]
-            if part
-        ) or "Adidas inventory change"
-        return {
-            "title": f"{product['name']} (Adidas)",
-            "url": product["url"],
-            "description": description,
-            "thumbnail": {"url": product.get("image", "")},
-            "fields": [
-                {"name": "Price", "value": f"${product.get('price', '0')}", "inline": True},
-                {"name": "Sizes", "value": ", ".join(product.get("sizes", {}).keys()) or "N/A", "inline": False},
-            ],
-        }
+    return scrape

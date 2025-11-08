@@ -27,3 +27,22 @@ async def broadcast_embeds(
             await send_embed(session, webhook, embed)
         except aiohttp.ClientError as exc:
             LOGGER.error("Failed to deliver embed to %s: %s", webhook, exc)
+
+
+async def validate_webhook(session: aiohttp.ClientSession, webhook_url: str) -> bool:
+    """Return ``True`` if the webhook URL is reachable and valid."""
+
+    try:
+        async with session.get(webhook_url) as response:
+            if response.status == 200:
+                LOGGER.info("Validated Discord webhook: %s", webhook_url)
+                return True
+            LOGGER.error(
+                "Discord webhook validation failed for %s with status %s",
+                webhook_url,
+                response.status,
+            )
+            return False
+    except aiohttp.ClientError as exc:
+        LOGGER.error("Discord webhook validation error for %s: %s", webhook_url, exc)
+        return False
