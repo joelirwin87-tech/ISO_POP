@@ -1,10 +1,4 @@
-"""Entry point for the sneaker monitor service.
-
-This script orchestrates the asynchronous monitors for each supported store. The
-implementation intentionally mirrors Amenity.IO's behaviour while adding
-extensive inline documentation to help operators understand rate limits,
-scalability and extension points.
-"""
+"""Entry point for the sneaker monitor service."""
 from __future__ import annotations
 
 import asyncio
@@ -12,25 +6,19 @@ import json
 import logging
 import signal
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Type
+from typing import Any, Dict, Iterable
 
 import aiohttp
 
-from sites.adidas import AdidasMonitor
-from sites.footlocker import FootlockerMonitor
-from sites.nike import NikeMonitor
-from sites.shopify import ShopifyMonitor
-from sites.snkrs import SnkrsMonitor
-from sites.supreme import SupremeMonitor
-from sites.yeezysupply import YeezySupplyMonitor
-from sites.base import SiteMonitor
+from sites import adidas, footlocker, nike, shopify, snkrs, supreme, yeezysupply
+from sites.base import MonitorConfig, SiteMonitor
 from utils.config_loader import ConfigError, load_config
+from utils.discord import validate_webhook
 from utils.logger import setup_logging
-from utils.proxy_manager import ProxyManager
-from utils.request import RequestClient
+from utils.request import fetch_text
 
-# Example Discord embed payload printed at startup so operators know exactly what
-# will be sent to their webhook.
+LOGGER = logging.getLogger(__name__)
+
 EXAMPLE_EMBED = {
     "title": "Nike Dunk Low Retro",
     "url": "https://www.nike.com/t/dunk-low-retro-shoe",
@@ -47,77 +35,74 @@ EXAMPLE_EMBED = {
     ],
 }
 
-SITE_FACTORIES: Dict[str, Type[SiteMonitor]] = {
-    "shopify": ShopifyMonitor,
-    "nike": NikeMonitor,
-    "adidas": AdidasMonitor,
-    "footlocker": FootlockerMonitor,
-    "supreme": SupremeMonitor,
-    "yeezysupply": YeezySupplyMonitor,
-    "snkrs": SnkrsMonitor,
+SCRAPER_FACTORIES = {
+    "shopify": shopify.create_scraper,
+    "nike": nike.create_scraper,
+    "adidas": adidas.create_scraper,
+    "footlocker": footlocker.create_scraper,
+    "supreme": supreme.create_scraper,
+    "yeezysupply": yeezysupply.create_scraper,
+    "snkrs": snkrs.create_scraper,
 }
-
-LOGGER = logging.getLogger(__name__)
 
 
 async def create_monitor(
     store: Dict[str, Any],
     *,
     session: aiohttp.ClientSession,
-    proxy_manager: ProxyManager,
     global_keywords: Iterable[str],
     global_refresh: float,
-    global_monitor_mode: str,
     webhooks: Iterable[str],
 ) -> SiteMonitor:
-    """Instantiate a monitor for the provided store configuration.
-
-    Inline guidance:
-        * Rate limiting: keep `refresh_interval` above ~5 seconds for Shopify and
-          Footlocker to avoid 429s. Supreme should be polled slower (15s+) due to
-          aggressive bans, and YeezySupply is safest at 30s+.
-        * Adding a new store: drop a module in ``sites/`` that subclasses
-          :class:`SiteMonitor`, add it to ``SITE_FACTORIES`` here, and include a
-          config entry with ``platform`` matching the key. Provide any
-          store-specific endpoints inside the store block.
-    """
-
     platform = store.get("platform", "").lower()
-    if platform not in SITE_FACTORIES:
+    if platform not in SCRAPER_FACTORIES:
         raise ConfigError(f"Unsupported platform '{platform}' for store {store.get('name')}")
 
-    monitor_cls = SITE_FACTORIES[platform]
-    store_refresh = float(store.get("refresh_interval", global_refresh))
-    # Use store specific keywords if supplied, otherwise fall back to global list.
+    scraper_factory = SCRAPER_FACTORIES[platform]
+    scrape_func = scraper_factory(store)
+
+    store_refresh = max(5.0, float(store.get("refresh_interval", global_refresh)))
     keywords = store.get("keywords") or list(global_keywords)
-    # Safe polling intervals are also documented in the README; enforcing a
-    # minimum of 3 seconds prevents hammering APIs during misconfiguration.
-    store_refresh = max(3.0, store_refresh)
+    jitter_low = float(store.get("jitter_min", 0.5))
+    jitter_high = float(store.get("jitter_max", 1.5))
+    if jitter_low > jitter_high:
+        jitter_low, jitter_high = jitter_high, jitter_low
 
-    request_client = RequestClient(
-        session=session,
-        proxy_manager=proxy_manager,
-        max_retries=int(store.get("max_retries", 3)),
-        backoff_factor=float(store.get("backoff_factor", 1.5)),
-        timeout=int(store.get("timeout", 10)),
-    )
-
-    # Ensure monitor mode inherits from the root when omitted.
-    store.setdefault(
-        "monitor_mode",
-        (store.get("monitor_mode") or global_monitor_mode).lower(),
-    )
-
-    monitor = monitor_cls(
+    monitor_config = MonitorConfig(
         name=store.get("name", platform.title()),
-        config=store,
+        site=store.get("site", store.get("name", platform.title())),
         refresh_interval=store_refresh,
-        keywords=keywords,
-        discord_webhooks=webhooks,
-        session=session,
-        request_client=request_client,
+        jitter_range=(jitter_low, jitter_high),
+        keywords=tuple(keywords),
+        scrape=scrape_func,
+        webhooks=tuple(webhooks),
     )
-    return monitor
+    return SiteMonitor(monitor_config, session)
+
+
+async def perform_startup_checks(session: aiohttp.ClientSession, webhooks: Iterable[str]) -> None:
+    LOGGER.info("Performing startup connectivity checks")
+    try:
+        await fetch_text(
+            session,
+            "https://www.google.com/generate_204",
+            timeout=5,
+            max_retries=2,
+            backoff_factor=1.0,
+        )
+    except Exception as exc:  # noqa: BLE001 - fail fast on connectivity issues
+        LOGGER.error("Network connectivity check failed: %s", exc)
+        raise SystemExit(1) from exc
+
+    invalid = False
+    for webhook in webhooks:
+        if not webhook:
+            continue
+        ok = await validate_webhook(session, webhook)
+        if not ok:
+            invalid = True
+    if invalid:
+        raise SystemExit(1)
 
 
 async def run_monitors(config_path: Path) -> None:
@@ -131,23 +116,17 @@ async def run_monitors(config_path: Path) -> None:
     LOGGER.info("Loaded configuration from %s", config_path)
     LOGGER.info("Example Discord embed: %s", json.dumps(EXAMPLE_EMBED, indent=2))
 
-    proxy_manager = ProxyManager(config.get("proxies", []))
-    if proxy_manager.enabled:
-        LOGGER.info("Loaded %s proxies for rotation", len(config.get("proxies", [])))
-    else:
-        LOGGER.warning("No proxies configured; consider adding them to avoid 429 blocks")
-
-    connector = aiohttp.TCPConnector(limit=100)
-    timeout = aiohttp.ClientTimeout(total=20)
+    connector = aiohttp.TCPConnector(limit=20)
+    timeout = aiohttp.ClientTimeout(total=25)
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        await perform_startup_checks(session, config.get("discord_webhooks", []))
+
         monitors = [
             await create_monitor(
                 store,
                 session=session,
-                proxy_manager=proxy_manager,
                 global_keywords=config.get("keywords", []),
                 global_refresh=float(config.get("refresh_interval", 15)),
-                global_monitor_mode=str(config.get("monitor_mode", "keywords")),
                 webhooks=config.get("discord_webhooks", []),
             )
             for store in config.get("stores", [])
@@ -170,7 +149,6 @@ async def run_monitors(config_path: Path) -> None:
             try:
                 loop.add_signal_handler(sig, _handle_shutdown)
             except NotImplementedError:
-                # Windows event loop does not support signal handlers.
                 pass
 
         await stop_event.wait()

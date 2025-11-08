@@ -2,9 +2,6 @@
   "refresh_interval": 15,
   "keywords": ["yeezy", "jordan", "dunk"],
   "monitor_mode": "keywords",
-  "proxies": [
-    "http://user:password@127.0.0.1:8000"
-  ],
   "discord_webhooks": [
     "https://discord.com/api/webhooks/EXAMPLE/REPLACE_WITH_REAL_WEBHOOK"
   ],

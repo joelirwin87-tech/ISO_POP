@@ -1,93 +1,85 @@
-"""HTTP helpers built on aiohttp with retry and proxy support."""
+"""HTTP helpers for direct scraping via aiohttp."""
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import random
 from typing import Any, Dict, Optional
 
 import aiohttp
 
-from .proxy_manager import ProxyManager
 from .user_agent import random_user_agent
 
 LOGGER = logging.getLogger(__name__)
 
 
-class RequestClient:
-    """Wrapper around :class:`aiohttp.ClientSession` that injects resiliency."""
+def _build_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    headers = {
+        "User-Agent": random_user_agent(),
+        "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+    if extra:
+        headers.update(extra)
+    return headers
 
-    def __init__(
-        self,
-        session: aiohttp.ClientSession,
-        proxy_manager: ProxyManager,
-        max_retries: int = 3,
-        backoff_factor: float = 1.5,
-        timeout: int = 10,
-    ) -> None:
-        self._session = session
-        self._proxy_manager = proxy_manager
-        self._max_retries = max(1, max_retries)
-        self._backoff_factor = max(0.1, backoff_factor)
-        self._timeout = aiohttp.ClientTimeout(total=timeout)
 
-    async def _request(self, method: str, url: str, **kwargs: Any) -> aiohttp.ClientResponse:
-        headers = kwargs.pop("headers", {})
-        headers.setdefault("User-Agent", random_user_agent())
-        headers.setdefault("Accept", "application/json, text/plain, */*")
-        headers.setdefault("Accept-Language", "en-US,en;q=0.9")
+async def fetch_text(
+    session: aiohttp.ClientSession,
+    url: str,
+    *,
+    params: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
+    timeout: int = 15,
+    max_retries: int = 3,
+    backoff_factor: float = 1.5,
+) -> str:
+    """Fetch a URL and return the response body as text."""
 
-        proxy = kwargs.pop("proxy", None)
-        if proxy:
-            LOGGER.debug("Using provided proxy %s", proxy)
-
-        attempt = 0
-        while True:
-            attempt += 1
-            chosen_proxy = proxy
-            if chosen_proxy is None:
-                chosen_proxy = await self._proxy_manager.next_proxy()
-            try:
-                response = await self._session.request(
-                    method,
-                    url,
-                    headers=headers,
-                    proxy=chosen_proxy,
-                    timeout=self._timeout,
-                    **kwargs,
-                )
-                if response.status in {403, 429}:
-                    LOGGER.warning("Received %s from %s, rotating proxy", response.status, url)
-                    await response.release()
-                    if attempt >= self._max_retries:
-                        raise aiohttp.ClientResponseError(
-                            request_info=response.request_info,
-                            history=response.history,
-                            status=response.status,
-                            message=f"Failed after {attempt} attempts",
-                            headers=response.headers,
-                        )
-                    await asyncio.sleep(self._backoff(attempt))
+    attempt = 0
+    while True:
+        attempt += 1
+        request_headers = _build_headers(headers)
+        try:
+            async with session.get(
+                url,
+                params=params,
+                headers=request_headers,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as response:
+                if response.status in {403, 429} and attempt < max_retries:
+                    LOGGER.warning(
+                        "Received %s from %s; retrying with backoff", response.status, url
+                    )
+                    await asyncio.sleep(_backoff_delay(backoff_factor, attempt))
                     continue
                 response.raise_for_status()
-                return response
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                LOGGER.error("Request error on %s attempt %s: %s", url, attempt, exc)
-                if attempt >= self._max_retries:
-                    raise
-                await asyncio.sleep(self._backoff(attempt))
-
-    def _backoff(self, attempt: int) -> float:
-        return self._backoff_factor * attempt
-
-    async def get_json(self, url: str, **kwargs: Any) -> Dict[str, Any]:
-        async with await self._request("GET", url, **kwargs) as response:
-            try:
-                return await response.json()
-            except aiohttp.ContentTypeError:
-                text = await response.text()
-                LOGGER.debug("Non-JSON response from %s: %s", url, text[:200])
+                return await response.text()
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            LOGGER.error("Request failure (%s) on %s: %s", attempt, url, exc)
+            if attempt >= max_retries:
                 raise
+            await asyncio.sleep(_backoff_delay(backoff_factor, attempt))
 
-    async def get_text(self, url: str, **kwargs: Any) -> str:
-        async with await self._request("GET", url, **kwargs) as response:
-            return await response.text()
+
+async def fetch_json(
+    session: aiohttp.ClientSession,
+    url: str,
+    **kwargs: Any,
+) -> Any:
+    """Fetch a URL returning JSON by parsing the text response."""
+
+    text = await fetch_text(session, url, **kwargs)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        LOGGER.debug("Failed to parse JSON from %s: %s", url, text[:200])
+        raise exc
+
+
+def _backoff_delay(backoff_factor: float, attempt: int) -> float:
+    jitter = random.uniform(0.4, 1.2)
+    return backoff_factor * attempt + jitter

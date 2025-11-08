@@ -1,21 +1,39 @@
 # Sneaker Monitor
 
-This project is a fully asynchronous sneaker monitor inspired by Amenity.IO. It
-supports Shopify, Nike, SNKRS, Adidas, Footlocker, Supreme, and YeezySupply
-stores with keyword or URL based filtering, proxy rotation, and Discord webhook
-alerts.
+An asynchronous sneaker monitor that scrapes retailer HTML directly without any
+private APIs or proxy infrastructure. The monitor targets Shopify, Nike, SNKRS,
+Adidas, Footlocker, Supreme, and YeezySupply stores and publishes Discord
+notifications whenever new inventory appears or sizes restock.
 
-## Features
+## Key Features
 
-- Concurrent async polling (``aiohttp`` + ``asyncio``) for rapid store coverage.
-- Modular architecture with site-specific scrapers in ``sites/`` and reusable
-  helpers in ``utils/``.
-- Rotating user agents and proxy pool support to mitigate bans.
-- Intelligent retry logic with exponential backoff for HTTP failures.
-- Discord embed notifications with product name, price, sizes, imagery, and
-direct-to-cart links.
-- Configurable via ``config.json`` (keywords, stores, refresh interval, webhooks,
-  proxies, and monitor mode).
+- Pure HTML scraping using `aiohttp` + `beautifulsoup4`; no API keys or proxies
+  required.
+- Randomised user-agents and headers on every request plus jittered polling
+  intervals to mimic organic browsing patterns.
+- Site-specific scrapers that parse JSON-LD, Next.js payloads, and semantic
+  markup to normalise `{title, url, image, price, sizes, site}` records.
+- Resilient retry logic with exponential backoff to gracefully handle transient
+  rate limiting and throttling responses.
+- Discord embeds with product imagery, pricing, and size availability.
+- Graceful shutdown handling and colourised structured logging.
+
+## How it Avoids Detection Without Proxies
+
+1. **Header Randomisation** – every request receives a fresh desktop or mobile
+   user-agent string alongside realistic Accept and language headers.
+2. **Jittered Polling** – monitors sleep for the configured refresh interval plus
+   a random delay, preventing predictable scraping intervals that trigger rate
+   limiters.
+3. **Keyword Fan-out Throttling** – keywords are processed sequentially with
+   per-keyword delays, reducing burst load on retailer infrastructure.
+4. **Backoff on Bans** – HTTP 403/429 responses trigger exponential backoff with
+   jitter before retrying, allowing load balancers to recover.
+5. **Minimal Concurrency** – a conservative aiohttp connector limit ensures the
+   monitor never floods a single host with parallel sockets.
+
+These techniques spread load across time so requests blend into regular customer
+traffic even when running without proxies.
 
 ## Quick Start
 
@@ -23,44 +41,45 @@ direct-to-cart links.
    ```bash
    pip install -r requirements.txt
    ```
-   *(The monitor only requires ``aiohttp``; feel free to install it manually if
-you prefer not to create a requirements file.)*
-2. Update ``config.json`` with real webhook URLs, stores, and optional proxies.
+2. Update `config.json` with your Discord webhook(s), keywords, and store
+   definitions.
 3. Run the monitor:
    ```bash
    python main.py
    ```
 
-The service prints an example Discord embed payload at startup so you can verify
-the message structure before enabling alerts.
+At startup the monitor verifies outbound network connectivity, checks that each
+Discord webhook is valid, and prints an example embed payload. When products are
+found or sizes restock an embed is dispatched to every configured webhook.
 
-## Configuration
+## Configuration Overview
 
-``config.json`` contains global defaults and a list of stores. Each store entry
-accepts:
+`config.json` contains global defaults plus a list of store objects. Each store
+supports:
 
-- ``name``: Friendly name for logging.
-- ``platform``: ``shopify``, ``nike``, ``snkrs``, ``adidas``, ``footlocker``,
-  ``supreme``, or ``yeezysupply``.
-- ``monitor_mode``: ``keywords`` or ``url``. URL mode expects ``product_ids``.
-- ``refresh_interval``: Optional override per store (seconds). See inline
-  comments in ``main.py`` for safe values to avoid rate limits.
-- ``endpoint`` / ``base_url`` / ``fallback_query``: Optional knobs for
-  fine-tuning API endpoints.
+- `name`: Friendly label used in logs.
+- `platform`: One of `shopify`, `nike`, `snkrs`, `adidas`, `footlocker`,
+  `supreme`, or `yeezysupply`.
+- `keywords`: Optional override for global keywords.
+- `refresh_interval`: Polling interval in seconds (minimum 5s is enforced).
+- `jitter_min` / `jitter_max`: Optional jitter applied after each poll.
+- Platform-specific knobs such as `base_url`, `search_path`, or
+  `catalog_path`.
 
-Global keys include ``keywords``, ``discord_webhooks``, ``proxies``, and the
-fallback ``refresh_interval``.
+Global keys include `keywords`, `refresh_interval`, and `discord_webhooks`.
 
 ## Adding New Stores
 
-1. Create a module under ``sites/`` that subclasses ``SiteMonitor``.
-2. Implement ``fetch_products`` to normalize product data and
-   ``build_embed`` for Discord payloads.
-3. Register the new platform in ``SITE_FACTORIES`` inside ``main.py`` and add a
-   store block to ``config.json``.
+1. Create a module in `sites/` that exposes `create_scraper(config)` and returns
+   an async `scrape(session, keyword)` coroutine.
+2. Parse the target site's HTML (JSON-LD, embedded scripts, or markup) and
+   return normalised product dictionaries with `{title, url, image, price, sizes,
+   site}`.
+3. Register the factory in `main.py`'s `SCRAPER_FACTORIES` mapping and add an
+   entry to `config.json`.
 
-Inline comments throughout the code outline rate-limiting considerations and
-extension tips.
+Each scraper automatically inherits caching, Discord notifications, and polling
+behaviour from the shared `SiteMonitor` base.
 
 ## Example Discord Embed
 
@@ -80,6 +99,7 @@ extension tips.
 
 ## Safety Notes
 
-- Respect each site's terms of service and rate limits.
-- Always route traffic through proxies you control.
-- Monitor log output for 403/429 responses and adjust intervals accordingly.
+- Respect each retailer's terms of service and rate limits.
+- Provide accurate keywords to keep requests scoped to relevant inventory.
+- Monitor logs for repeated 403/429 responses and increase refresh intervals if
+  required.
