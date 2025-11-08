@@ -13,12 +13,27 @@ import aiohttp
 from sites import adidas, footlocker, nike, shopify, snkrs, supreme, yeezysupply
 from sites.base import MonitorConfig, SiteMonitor
 from utils.config_loader import ConfigError, load_config
-from utils.discord import DiscordNotifier, resolve_webhook_url
+from utils.discord import validate_webhook
 from utils.logger import setup_logging
 from utils.request import fetch_text
-from utils.env import load_dotenv
 
 LOGGER = logging.getLogger(__name__)
+
+EXAMPLE_EMBED = {
+    "title": "Nike Dunk Low Retro",
+    "url": "https://www.nike.com/t/dunk-low-retro-shoe",
+    "description": "New sizes: 8, 9 | Restocks: 10",
+    "thumbnail": {"url": "https://static.nike.com/a/images/t_prod/p/nike-dunk.jpg"},
+    "fields": [
+        {"name": "Price", "value": "$120.00", "inline": True},
+        {"name": "Sizes", "value": "7, 8, 9, 10", "inline": False},
+        {
+            "name": "Direct Cart",
+            "value": "https://www.nike.com/t/dunk-low-retro-shoe",
+            "inline": False,
+        },
+    ],
+}
 
 SCRAPER_FACTORIES = {
     "shopify": shopify.create_scraper,
@@ -35,9 +50,9 @@ async def create_monitor(
     store: Dict[str, Any],
     *,
     session: aiohttp.ClientSession,
-    notifier: DiscordNotifier,
     global_keywords: Iterable[str],
     global_refresh: float,
+    webhooks: Iterable[str],
 ) -> SiteMonitor:
     platform = store.get("platform", "").lower()
     if platform not in SCRAPER_FACTORIES:
@@ -60,13 +75,12 @@ async def create_monitor(
         jitter_range=(jitter_low, jitter_high),
         keywords=tuple(keywords),
         scrape=scrape_func,
+        webhooks=tuple(webhooks),
     )
-    return SiteMonitor(monitor_config, session, notifier)
+    return SiteMonitor(monitor_config, session)
 
 
-async def perform_startup_checks(
-    session: aiohttp.ClientSession, notifier: DiscordNotifier
-) -> None:
+async def perform_startup_checks(session: aiohttp.ClientSession, webhooks: Iterable[str]) -> None:
     LOGGER.info("Performing startup connectivity checks")
     try:
         await fetch_text(
@@ -80,7 +94,15 @@ async def perform_startup_checks(
         LOGGER.error("Network connectivity check failed: %s", exc)
         raise SystemExit(1) from exc
 
-    await notifier.ensure_ready()
+    invalid = False
+    for webhook in webhooks:
+        if not webhook:
+            continue
+        ok = await validate_webhook(session, webhook)
+        if not ok:
+            invalid = True
+    if invalid:
+        raise SystemExit(1)
 
 
 async def run_monitors(config_path: Path) -> None:
@@ -93,57 +115,20 @@ async def run_monitors(config_path: Path) -> None:
         raise SystemExit(1) from exc
 
     LOGGER.info("Loaded configuration from %s", config_path)
+    LOGGER.info("Example Discord embed: %s", json.dumps(EXAMPLE_EMBED, indent=2))
 
     connector = aiohttp.TCPConnector(limit=20)
     timeout = aiohttp.ClientTimeout(total=25)
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-        notifier = DiscordNotifier(session, resolve_webhook_url())
-        redacted = (
-            f"{notifier.webhook_url[:40]}..." if len(notifier.webhook_url) > 43 else notifier.webhook_url
-        )
-        LOGGER.info("Using Discord webhook: %s", redacted)
-        await perform_startup_checks(session, notifier)
-
-        store_names = [
-            store.get("name")
-            or store.get("site")
-            or store.get("platform", "Unknown Store").title()
-            for store in config.get("stores", [])
-        ]
-        refresh_interval = float(config.get("refresh_interval", 15))
-        timestamp = datetime.now(timezone.utc).isoformat()
-        startup_embed = {
-            "title": "Sneaker Monitor Active",
-            "color": 0x00FFAA,
-            "description": "Monitor service connected to Discord.",
-            "fields": [
-                {
-                    "name": "Stores",
-                    "value": "\n".join(store_names) if store_names else "None configured",
-                    "inline": False,
-                },
-                {
-                    "name": "Refresh Interval",
-                    "value": f"{refresh_interval:.1f}s",
-                    "inline": True,
-                },
-                {
-                    "name": "Started",
-                    "value": timestamp,
-                    "inline": True,
-                },
-            ],
-        }
-        if not await notifier.send_embed(startup_embed):
-            LOGGER.error("Failed to deliver startup embed to Discord")
+        await perform_startup_checks(session, config.get("discord_webhooks", []))
 
         monitors = [
             await create_monitor(
                 store,
                 session=session,
-                notifier=notifier,
                 global_keywords=config.get("keywords", []),
                 global_refresh=float(config.get("refresh_interval", 15)),
+                webhooks=config.get("discord_webhooks", []),
             )
             for store in config.get("stores", [])
         ]

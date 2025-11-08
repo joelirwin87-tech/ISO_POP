@@ -2,6 +2,9 @@
   "refresh_interval": 15,
   "keywords": ["yeezy", "jordan", "dunk"],
   "monitor_mode": "keywords",
+  "discord_webhooks": [
+    "https://discord.com/api/webhooks/EXAMPLE/REPLACE_WITH_REAL_WEBHOOK"
+  ],
   "stores": [
     {
       "name": "Kith - Shopify",

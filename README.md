@@ -41,19 +41,16 @@ traffic even when running without proxies.
    ```bash
    pip install -r requirements.txt
    ```
-2. Optional: create a `.env` file with `DISCORD_WEBHOOK=<your_webhook_url>` to
-   override the bundled default webhook. Update `config.json` with keywords and
-   store definitions.
+2. Update `config.json` with your Discord webhook(s), keywords, and store
+   definitions.
 3. Run the monitor:
    ```bash
    python main.py
    ```
 
-At startup the monitor verifies outbound network connectivity, validates the
-active Discord webhook (retrying every 60 seconds on failure), and sends a
-"Sneaker Monitor Active" embed containing the monitored stores, refresh
-interval, and launch timestamp. When products are found or sizes restock an
-embed is dispatched through the same webhook session.
+At startup the monitor verifies outbound network connectivity, checks that each
+Discord webhook is valid, and prints an example embed payload. When products are
+found or sizes restock an embed is dispatched to every configured webhook.
 
 ## Configuration Overview
 
@@ -69,9 +66,7 @@ supports:
 - Platform-specific knobs such as `base_url`, `search_path`, or
   `catalog_path`.
 
-Global keys include `keywords` and `refresh_interval`. Discord webhook routing
-is handled via the `DISCORD_WEBHOOK` environment variable (or the bundled
-default webhook when omitted).
+Global keys include `keywords`, `refresh_interval`, and `discord_webhooks`.
 
 ## Adding New Stores
 

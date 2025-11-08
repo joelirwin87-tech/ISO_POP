@@ -68,35 +68,23 @@ class DiscordNotifier:
                 LOGGER.info("Sent Discord embed: %s", embed.get("title", "(no title)"))
                 return True
         except aiohttp.ClientError as exc:
-            LOGGER.error("Discord webhook request failed: %s", exc)
-            return False
+            LOGGER.error("Failed to deliver embed to %s: %s", webhook, exc)
 
-    async def send_message(self, content: str) -> bool:
-        """Send a plain content message to the webhook."""
 
-        payload: Dict[str, Any] = {"content": content}
-        try:
-            async with self._session.post(self._webhook_url, json=payload) as response:
-                if response.status >= 400:
-                    text = await response.text()
-                    LOGGER.error(
-                        "Discord webhook error %s when sending message: %s",
-                        response.status,
-                        text,
-                    )
-                    return False
-                LOGGER.info("Sent Discord message: %s", content[:60])
+async def validate_webhook(session: aiohttp.ClientSession, webhook_url: str) -> bool:
+    """Return ``True`` if the webhook URL is reachable and valid."""
+
+    try:
+        async with session.get(webhook_url) as response:
+            if response.status == 200:
+                LOGGER.info("Validated Discord webhook: %s", webhook_url)
                 return True
-        except aiohttp.ClientError as exc:
-            LOGGER.error("Discord webhook message failed: %s", exc)
+            LOGGER.error(
+                "Discord webhook validation failed for %s with status %s",
+                webhook_url,
+                response.status,
+            )
             return False
-
-    async def send_error(self, title: str, description: str, *, color: Optional[int] = None) -> bool:
-        """Send an error embed with a consistent formatting."""
-
-        embed = {
-            "title": title,
-            "description": description,
-            "color": color if color is not None else 0xFF5555,
-        }
-        return await self.send_embed(embed)
+    except aiohttp.ClientError as exc:
+        LOGGER.error("Discord webhook validation error for %s: %s", webhook_url, exc)
+        return False

@@ -10,7 +10,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Sequence
 import aiohttp
 
 from utils.cache import ProductCache, ProductSnapshot
-from utils.discord import DiscordNotifier
+from utils.discord import broadcast_embeds
 
 LOGGER = logging.getLogger(__name__)
 
@@ -26,22 +26,17 @@ class MonitorConfig:
     jitter_range: Sequence[float]
     keywords: Sequence[str]
     scrape: ScrapeFunc
+    webhooks: Sequence[str]
 
 
 class SiteMonitor:
     """Polls a scraping function and emits Discord notifications on changes."""
 
-    def __init__(
-        self,
-        config: MonitorConfig,
-        session: aiohttp.ClientSession,
-        notifier: DiscordNotifier,
-    ) -> None:
+    def __init__(self, config: MonitorConfig, session: aiohttp.ClientSession) -> None:
         self._config = config
         self._session = session
         self._cache = ProductCache()
         self._running = False
-        self._notifier = notifier
 
     async def start(self) -> None:
         self._running = True
@@ -55,10 +50,6 @@ class SiteMonitor:
             raise
         except Exception:  # noqa: BLE001 - catch-all to protect orchestrator
             LOGGER.exception("Monitor %s crashed unexpectedly", self._config.name)
-            await self._notifier.send_error(
-                f"{self._config.name} monitor crashed",
-                "Unexpected exception in monitor loop; see logs for details.",
-            )
         finally:
             LOGGER.info("Monitor %s stopped", self._config.name)
 
@@ -71,16 +62,8 @@ class SiteMonitor:
         for keyword in keywords:
             try:
                 results = await self._config.scrape(self._session, keyword)
-            except Exception as exc:  # noqa: BLE001 - surfaces parsing/network failures per keyword
+            except Exception:  # noqa: BLE001 - surfaces parsing/network failures per keyword
                 LOGGER.exception("%s scrape failed for keyword '%s'", self._config.name, keyword)
-                notified = await self._notifier.send_error(
-                    f"{self._config.name} scrape failed",
-                    f"Keyword '{keyword}' failed with error: {exc}",
-                )
-                if not notified:
-                    LOGGER.error(
-                        "Failed to notify Discord about scrape error for %s", self._config.name
-                    )
                 continue
             LOGGER.debug("%s returned %s products for '%s'", self._config.name, len(results), keyword)
             for result in results:
@@ -111,13 +94,7 @@ class SiteMonitor:
             diff = self._cache.diff(url, snapshot)
             if diff["is_new"] or diff["new_sizes"] or diff["restocks"]:
                 embed = self._build_embed(product, diff)
-                ok = await self._notifier.send_embed(embed)
-                if not ok:
-                    LOGGER.error(
-                        "Discord notification failed for %s (%s)",
-                        self._config.name,
-                        product.get("url", "unknown"),
-                    )
+                await broadcast_embeds(self._session, self._config.webhooks, embed)
 
     async def _sleep_with_jitter(self) -> None:
         base = self._config.refresh_interval
