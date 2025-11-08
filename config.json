@@ -1,0 +1,52 @@
+{
+  "refresh_interval": 15,
+  "keywords": ["yeezy", "jordan", "dunk"],
+  "monitor_mode": "keywords",
+  "proxies": [
+    "http://user:password@127.0.0.1:8000"
+  ],
+  "discord_webhooks": [
+    "https://discord.com/api/webhooks/EXAMPLE/REPLACE_WITH_REAL_WEBHOOK"
+  ],
+  "stores": [
+    {
+      "name": "Kith - Shopify",
+      "platform": "shopify",
+      "base_url": "https://kith.com",
+      "monitor_mode": "keywords",
+      "endpoint": "https://kith.com/products.json?limit=30"
+    },
+    {
+      "name": "Nike SNKRS",
+      "platform": "snkrs",
+      "monitor_mode": "keywords"
+    },
+    {
+      "name": "Nike Retail",
+      "platform": "nike",
+      "monitor_mode": "keywords"
+    },
+    {
+      "name": "Adidas US",
+      "platform": "adidas",
+      "monitor_mode": "keywords",
+      "fallback_query": "yeezy"
+    },
+    {
+      "name": "Footlocker",
+      "platform": "footlocker",
+      "monitor_mode": "keywords",
+      "fallback_query": "jordan"
+    },
+    {
+      "name": "Supreme",
+      "platform": "supreme",
+      "monitor_mode": "keywords"
+    },
+    {
+      "name": "YeezySupply",
+      "platform": "yeezysupply",
+      "monitor_mode": "keywords"
+    }
+  ]
+}
