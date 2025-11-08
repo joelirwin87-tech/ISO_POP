@@ -19,30 +19,20 @@ direct-to-cart links.
 
 ## Quick Start
 
-1. Copy ``.env.example`` to ``.env`` and populate required secrets:
-   ```bash
-   cp .env.example .env
-   ```
-   At minimum set ``DISCORD_WEBHOOK_URLS``; ``PROXY_LIST`` accepts comma or newline separated proxy URLs.
-2. Install dependencies:
+1. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
-3. Update ``config.json`` if you need to tweak stores, keywords, or monitor defaults. Secrets should stay in ``.env``.
-4. Run the monitor:
+   *(The monitor only requires ``aiohttp``; feel free to install it manually if
+you prefer not to create a requirements file.)*
+2. Update ``config.json`` with real webhook URLs, stores, and optional proxies.
+3. Run the monitor:
    ```bash
    python main.py
    ```
 
-Startup writes ``data/example_embed.json`` and posts a health-check embed (unless ``DISABLE_STARTUP_PING`` is ``true``) so you can verify Discord delivery immediately.
-
-### Docker
-
-```bash
-docker compose up --build
-```
-
-The compose stack mounts ``config.json`` read-only, loads environment variables from ``.env``, and restarts the container automatically on failure.
+The service prints an example Discord embed payload at startup so you can verify
+the message structure before enabling alerts.
 
 ## Configuration
 
@@ -59,7 +49,7 @@ accepts:
   fine-tuning API endpoints.
 
 Global keys include ``keywords``, ``discord_webhooks``, ``proxies``, and the
-fallback ``refresh_interval``. Environment placeholders such as ``${DISCORD_WEBHOOK_URLS}`` are resolved at runtime so secrets stay out of version control.
+fallback ``refresh_interval``.
 
 ## Adding New Stores
 
@@ -90,7 +80,6 @@ extension tips.
 
 ## Safety Notes
 
-- Respect each site's terms of service and rate limits. Safe polling intervals are enforced at three seconds minimum per store to mitigate bans.
+- Respect each site's terms of service and rate limits.
 - Always route traffic through proxies you control.
 - Monitor log output for 403/429 responses and adjust intervals accordingly.
-- Log files write to ``logs/monitor.log`` and runtime artifacts are stored in ``cache/`` and ``data/``.

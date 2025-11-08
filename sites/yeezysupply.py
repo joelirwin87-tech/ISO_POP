@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
+from utils.request import RequestClient
+
 from .base import SiteMonitor
 
 LOGGER = logging.getLogger(__name__)
@@ -11,9 +13,10 @@ LOGGER = logging.getLogger(__name__)
 
 class YeezySupplyMonitor(SiteMonitor):
     async def fetch_products(self) -> List[Dict[str, Any]]:
+        request_client: RequestClient = self.config["request_client"]
         endpoint = self.config.get("endpoint", "https://www.yeezysupply.com/api/yeezy/releases")
         try:
-            data = await self.request_client.get_json(endpoint)
+            data = await request_client.get_json(endpoint)
         except Exception as exc:  # noqa: BLE001 - the endpoint is notoriously unstable.
             LOGGER.warning("Failed to fetch YeezySupply data from %s: %s", endpoint, exc)
             return []

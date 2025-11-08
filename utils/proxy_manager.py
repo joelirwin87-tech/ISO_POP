@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import random
-from typing import Iterable, List, Optional
+from typing import Iterable, Optional
 
 
 class ProxyManager:
@@ -14,10 +14,6 @@ class ProxyManager:
         self._proxies = [proxy.strip() for proxy in proxies or [] if proxy.strip()]
         self._lock = asyncio.Lock()
         self._cycle = itertools.cycle(self._proxies) if self._proxies else None
-
-    @property
-    def proxies(self) -> List[str]:
-        return list(self._proxies)
 
     @property
     def enabled(self) -> bool:

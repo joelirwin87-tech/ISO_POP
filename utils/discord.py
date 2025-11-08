@@ -1,7 +1,6 @@
 """Discord webhook helper."""
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any, Dict, Iterable
 
@@ -23,13 +22,8 @@ async def send_embed(session: aiohttp.ClientSession, webhook_url: str, embed: Di
 async def broadcast_embeds(
     session: aiohttp.ClientSession, webhook_urls: Iterable[str], embed: Dict[str, Any]
 ) -> None:
-    tasks = []
     for webhook in webhook_urls:
-        tasks.append(asyncio.create_task(send_embed(session, webhook, embed)))
-    if not tasks:
-        return
-    for task in tasks:
         try:
-            await task
+            await send_embed(session, webhook, embed)
         except aiohttp.ClientError as exc:
-            LOGGER.error("Failed to deliver embed: %s", exc)
+            LOGGER.error("Failed to deliver embed to %s: %s", webhook, exc)
