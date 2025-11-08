@@ -1,0 +1,25 @@
+{
+  "title": "Nike Dunk Low Retro",
+  "url": "https://www.nike.com/t/dunk-low-retro-shoe",
+  "description": "New sizes: 8, 9 | Restocks: 10",
+  "thumbnail": {
+    "url": "https://static.nike.com/a/images/t_prod/p/nike-dunk.jpg"
+  },
+  "fields": [
+    {
+      "name": "Price",
+      "value": "$120.00",
+      "inline": true
+    },
+    {
+      "name": "Sizes",
+      "value": "7, 8, 9, 10",
+      "inline": false
+    },
+    {
+      "name": "Direct Cart",
+      "value": "https://www.nike.com/t/dunk-low-retro-shoe",
+      "inline": false
+    }
+  ]
+}
