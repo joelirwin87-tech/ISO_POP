@@ -7,34 +7,40 @@ from typing import Dict, Iterable, List
 
 @dataclass
 class ProductSnapshot:
-    name: str
-    sizes: Dict[str, int]
+    title: str
     price: str
     image: str
     url: str
-    direct_to_cart: str
+    site: str
+    sizes: Dict[str, bool]
 
 
 @dataclass
 class ProductCache:
     _products: Dict[str, ProductSnapshot] = field(default_factory=dict)
 
-    def diff(self, product_id: str, new_snapshot: ProductSnapshot) -> Dict[str, List[str]]:
+    def diff(self, product_id: str, new_snapshot: ProductSnapshot) -> Dict[str, List[str] | bool]:
         """Compare snapshots and return a diff dict describing changes."""
         previous = self._products.get(product_id)
-        changes: Dict[str, List[str]] = {"new_sizes": [], "restocks": [], "oos": []}
+        changes: Dict[str, List[str] | bool] = {
+            "new_sizes": [],
+            "restocks": [],
+            "oos": [],
+            "is_new": False,
+        }
         if previous is None:
             self._products[product_id] = new_snapshot
-            changes["new_sizes"] = list(new_snapshot.sizes.keys())
+            changes["new_sizes"] = [size for size, available in new_snapshot.sizes.items() if available]
+            changes["is_new"] = True
             return changes
 
         for size, stock in new_snapshot.sizes.items():
             previous_stock = previous.sizes.get(size, 0)
-            if previous_stock == 0 and stock > 0:
+            if not previous_stock and stock:
                 changes["restocks"].append(size)
 
         for size, stock in previous.sizes.items():
-            if stock > 0 and new_snapshot.sizes.get(size, 0) == 0:
+            if stock and not new_snapshot.sizes.get(size, False):
                 changes["oos"].append(size)
 
         self._products[product_id] = new_snapshot

@@ -1,112 +1,151 @@
-"""Common base class for store monitors."""
+"""Generic site monitor built around HTML scrapers."""
 from __future__ import annotations
 
-import abc
 import asyncio
 import logging
-from typing import Any, Dict, Iterable, List
+import random
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Dict, List, Sequence
 
 import aiohttp
 
 from utils.cache import ProductCache, ProductSnapshot
-from utils.discord import broadcast_embeds
-from utils.request import RequestClient
+from utils.discord import DiscordNotifier
 
 LOGGER = logging.getLogger(__name__)
 
+ScrapeResult = Dict[str, Any]
+ScrapeFunc = Callable[[aiohttp.ClientSession, str], Awaitable[List[ScrapeResult]]]
 
-class SiteMonitor(abc.ABC):
-    """Abstract base class implementing common polling logic."""
+
+@dataclass(frozen=True)
+class MonitorConfig:
+    name: str
+    site: str
+    refresh_interval: float
+    jitter_range: Sequence[float]
+    keywords: Sequence[str]
+    scrape: ScrapeFunc
+
+
+class SiteMonitor:
+    """Polls a scraping function and emits Discord notifications on changes."""
 
     def __init__(
         self,
-        name: str,
-        config: Dict[str, Any],
-        refresh_interval: float,
-        keywords: Iterable[str],
-        discord_webhooks: Iterable[str],
+        config: MonitorConfig,
         session: aiohttp.ClientSession,
-        request_client: RequestClient,
+        notifier: DiscordNotifier,
     ) -> None:
-        self.name = name
-        self.config = config
-        self.refresh_interval = refresh_interval
-        self.keywords = [kw.lower() for kw in keywords]
-        self.webhooks = list(discord_webhooks)
-        self.session = session
-        self.request_client = request_client
-        self.cache = ProductCache()
-        self.monitor_mode = config.get("monitor_mode", "keywords")
-        self._running = True
+        self._config = config
+        self._session = session
+        self._cache = ProductCache()
+        self._running = False
+        self._notifier = notifier
 
     async def start(self) -> None:
-        """Continuously poll the site until cancelled."""
-        LOGGER.info("Starting monitor for %s", self.name)
-        while self._running:
-            try:
+        self._running = True
+        LOGGER.info("Starting monitor for %s", self._config.name)
+        try:
+            while self._running:
                 await self._poll_once()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 - we want to catch everything here.
-                LOGGER.exception("Monitor %s encountered an error: %s", self.name, exc)
-            await asyncio.sleep(self.refresh_interval)
+                await self._sleep_with_jitter()
+        except asyncio.CancelledError:
+            LOGGER.info("Monitor %s cancelled", self._config.name)
+            raise
+        except Exception:  # noqa: BLE001 - catch-all to protect orchestrator
+            LOGGER.exception("Monitor %s crashed unexpectedly", self._config.name)
+            await self._notifier.send_error(
+                f"{self._config.name} monitor crashed",
+                "Unexpected exception in monitor loop; see logs for details.",
+            )
+        finally:
+            LOGGER.info("Monitor %s stopped", self._config.name)
 
     async def stop(self) -> None:
         self._running = False
 
     async def _poll_once(self) -> None:
-        products = await self.fetch_products()
-        filtered = self.filter_products(products)
-        await self._handle_products(filtered)
+        keywords = list(self._config.keywords) or [""]
+        aggregated: List[ScrapeResult] = []
+        for keyword in keywords:
+            try:
+                results = await self._config.scrape(self._session, keyword)
+            except Exception as exc:  # noqa: BLE001 - surfaces parsing/network failures per keyword
+                LOGGER.exception("%s scrape failed for keyword '%s'", self._config.name, keyword)
+                notified = await self._notifier.send_error(
+                    f"{self._config.name} scrape failed",
+                    f"Keyword '{keyword}' failed with error: {exc}",
+                )
+                if not notified:
+                    LOGGER.error(
+                        "Failed to notify Discord about scrape error for %s", self._config.name
+                    )
+                continue
+            LOGGER.debug("%s returned %s products for '%s'", self._config.name, len(results), keyword)
+            for result in results:
+                result.setdefault("site", self._config.site)
+                result.setdefault("keyword", keyword)
+            aggregated.extend(results)
+            await asyncio.sleep(random.uniform(0.4, 1.1))
 
-    def filter_products(self, products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        if self.monitor_mode == "keywords" and self.keywords:
-            filtered = []
-            for product in products:
-                name = product.get("name", "").lower()
-                if any(keyword in name for keyword in self.keywords):
-                    filtered.append(product)
-            return filtered
-        if self.monitor_mode == "url":
-            allowed_ids = {entry.lower() for entry in self.config.get("product_ids", [])}
-            allowed_urls = {entry.lower() for entry in self.config.get("product_urls", [])}
-            if not (allowed_ids or allowed_urls):
-                return products
-            filtered: List[Dict[str, Any]] = []
-            for product in products:
-                product_id = product.get("id", "").lower()
-                product_url = product.get("url", "").lower()
-                if (allowed_ids and product_id in allowed_ids) or (
-                    allowed_urls and product_url in allowed_urls
-                ):
-                    filtered.append(product)
-            return filtered
-        return products
+        if not aggregated:
+            LOGGER.debug("%s produced no results on this poll", self._config.name)
+            return
 
-    async def _handle_products(self, products: List[Dict[str, Any]]) -> None:
-        valid_ids = [product["id"] for product in products if "id" in product]
-        self.cache.prune(valid_ids)
-        for product in products:
-            product_id = product.get("id")
-            if not product_id:
+        identifiers = [product.get("url", "") for product in aggregated if product.get("url")]
+        self._cache.prune(identifiers)
+
+        for product in aggregated:
+            url = product.get("url")
+            if not url:
                 continue
             snapshot = ProductSnapshot(
-                name=product.get("name", "Unknown Product"),
-                sizes=product.get("sizes", {}),
-                price=product.get("price", "N/A"),
+                title=product.get("title", "Unknown Product"),
+                price=str(product.get("price", "N/A")),
                 image=product.get("image", ""),
-                url=product.get("url", ""),
-                direct_to_cart=product.get("direct_to_cart", ""),
+                url=url,
+                site=product.get("site", self._config.site),
+                sizes={size: bool(available) for size, available in product.get("sizes", {}).items()},
             )
-            diff = self.cache.diff(product_id, snapshot)
-            if diff["new_sizes"] or diff["restocks"]:
-                embed = self.build_embed(product, diff)
-                await broadcast_embeds(self.session, self.webhooks, embed)
+            diff = self._cache.diff(url, snapshot)
+            if diff["is_new"] or diff["new_sizes"] or diff["restocks"]:
+                embed = self._build_embed(product, diff)
+                ok = await self._notifier.send_embed(embed)
+                if not ok:
+                    LOGGER.error(
+                        "Discord notification failed for %s (%s)",
+                        self._config.name,
+                        product.get("url", "unknown"),
+                    )
 
-    @abc.abstractmethod
-    async def fetch_products(self) -> List[Dict[str, Any]]:
-        """Return a list of normalized product dictionaries."""
+    async def _sleep_with_jitter(self) -> None:
+        base = self._config.refresh_interval
+        jitter_low, jitter_high = self._config.jitter_range
+        await asyncio.sleep(base + random.uniform(jitter_low, jitter_high))
 
-    @abc.abstractmethod
-    def build_embed(self, product: Dict[str, Any], diff: Dict[str, List[str]]) -> Dict[str, Any]:
-        """Construct a Discord embed payload for notifications."""
+    def _build_embed(self, product: ScrapeResult, diff: Dict[str, Any]) -> Dict[str, Any]:
+        description_parts = []
+        if diff.get("is_new"):
+            description_parts.append("New product detected")
+        if diff.get("new_sizes"):
+            description_parts.append(f"New sizes: {', '.join(diff['new_sizes'])}")
+        if diff.get("restocks"):
+            description_parts.append(f"Restocks: {', '.join(diff['restocks'])}")
+        if diff.get("oos"):
+            description_parts.append(f"Now OOS: {', '.join(diff['oos'])}")
+
+        description = " | ".join(description_parts) or f"Update detected on {self._config.site}"
+        size_display = ", ".join(size for size, available in product.get("sizes", {}).items() if available)
+
+        return {
+            "title": product.get("title", "Unknown Product"),
+            "url": product.get("url", ""),
+            "description": description,
+            "thumbnail": {"url": product.get("image", "")},
+            "fields": [
+                {"name": "Site", "value": product.get("site", self._config.site), "inline": True},
+                {"name": "Price", "value": str(product.get("price", "N/A")), "inline": True},
+                {"name": "Sizes", "value": size_display or "Unknown", "inline": False},
+            ],
+        }

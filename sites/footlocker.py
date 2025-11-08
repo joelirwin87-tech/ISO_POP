@@ -1,60 +1,72 @@
-"""Footlocker monitor implementation."""
+"""HTML scraper for Footlocker search results."""
 from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List
+from urllib.parse import urlencode
 
-from .base import SiteMonitor
+from bs4 import BeautifulSoup
+
+from utils.request import fetch_text
+
+from .parsers import iter_json_scripts
 
 LOGGER = logging.getLogger(__name__)
 
+SITE_NAME = "Footlocker"
 
-class FootlockerMonitor(SiteMonitor):
-    async def fetch_products(self) -> List[Dict[str, Any]]:
-        keyword_query = "+".join(self.keywords) if self.keywords else self.config.get("fallback_query", "jordan")
-        endpoint = self.config.get(
-            "endpoint",
-            f"https://www.footlocker.com/api/products/search?query={keyword_query}&count=20",
-        )
-        data = await self.request_client.get_json(endpoint)
+
+def create_scraper(config: Dict[str, Any]):
+    base_url = config.get("base_url", "https://www.footlocker.com")
+    search_path = config.get("search_path", "/search")
+
+    async def scrape(session, keyword):
+        query = keyword or config.get("fallback_query", "")
+        if not query:
+            return []
+        params = urlencode({"query": query})
+        search_url = f"{base_url.rstrip('/')}{search_path}?{params}"
+        html = await fetch_text(session, search_url)
+        soup = BeautifulSoup(html, "html.parser")
         products: List[Dict[str, Any]] = []
-        for product in data.get("results", []):
-            product_id = product.get("id") or product.get("productId")
-            sizes = {}
-            for sku in product.get("skuInfo", []):
-                sizes[sku.get("size", "One Size")] = 1 if sku.get("available", False) else 0
-            image = product.get("imageUrl")
-            url = f"https://www.footlocker.com/product/~/{product.get('urlKey', product_id)}.html"
-            price = product.get("price", {}).get("currentPrice", 0)
-            products.append(
-                {
-                    "id": product_id,
-                    "name": product.get("name", "Footlocker Product"),
-                    "price": f"{price:,.2f}",
-                    "image": image,
-                    "url": url,
-                    "direct_to_cart": url,
-                    "sizes": sizes,
-                }
-            )
+
+        for payload in iter_json_scripts(soup, script_id="__NEXT_DATA__"):
+            try:
+                items = payload["props"]["pageProps"]["initialState"]["products"]["listing"]
+            except KeyError:
+                continue
+            for item in items:
+                title = item.get("name") or ""
+                if keyword and keyword.lower() not in title.lower():
+                    continue
+                url = item.get("pdpLink") or ""
+                if url.startswith("/"):
+                    url = f"{base_url.rstrip('/')}{url}"
+                price_raw = item.get("price") or item.get("salePrice")
+                if isinstance(price_raw, (int, float)):
+                    price = f"${price_raw:,.2f}"
+                else:
+                    price = str(price_raw) if price_raw else "Unknown"
+                image = (item.get("images") or {}).get("productImage") or ""
+                sizes = {}
+                for size in item.get("sizes", []):
+                    label = size.get("size") or size.get("displaySize")
+                    available = size.get("available", False)
+                    if label:
+                        sizes[str(label)] = available
+                products.append(
+                    {
+                        "title": title,
+                        "url": url,
+                        "image": image,
+                        "price": price,
+                        "sizes": sizes,
+                        "site": config.get("name", SITE_NAME),
+                    }
+                )
+
+        if not products:
+            LOGGER.debug("Footlocker scraper found no data for %s", search_url)
         return products
 
-    def build_embed(self, product: Dict[str, Any], diff: Dict[str, List[str]]) -> Dict[str, Any]:
-        parts = []
-        if diff["new_sizes"]:
-            parts.append(f"New: {', '.join(diff['new_sizes'])}")
-        if diff["restocks"]:
-            parts.append(f"Restock: {', '.join(diff['restocks'])}")
-        if diff["oos"]:
-            parts.append(f"OOS: {', '.join(diff['oos'])}")
-        description = " | ".join(parts) or "Footlocker change detected"
-        return {
-            "title": f"{product['name']} (Footlocker)",
-            "url": product["url"],
-            "description": description,
-            "thumbnail": {"url": product.get("image", "")},
-            "fields": [
-                {"name": "Price", "value": f"${product.get('price', '0')}", "inline": True},
-                {"name": "Sizes", "value": ", ".join(product.get("sizes", {}).keys()) or "N/A", "inline": False},
-            ],
-        }
+    return scrape
