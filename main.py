@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import signal
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
@@ -107,6 +107,7 @@ async def perform_startup_checks(session: aiohttp.ClientSession, webhooks: Itera
 
 async def run_monitors(config_path: Path) -> None:
     setup_logging()
+    load_dotenv()
     try:
         config = load_config(config_path)
     except ConfigError as exc:
